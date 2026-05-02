@@ -5,6 +5,7 @@ X32Ctrl::X32Ctrl(X32BaseParameter* basepar) : X32Base(basepar) {
 	surface = new Surface(basepar);
 	xremote = new XRemote(basepar);
 	lcdmenu = new LcdMenu(basepar, mixer, surface); // only used for X32Core (at the moment, maybe later for assing-section?)
+	artnet = new Artnet(basepar);
 }
 
 // ###########################################################################
@@ -68,6 +69,10 @@ void X32Ctrl::Init(){
 		lcdmenu->OnInit();
 	}
 
+	helper->DEBUG_X32CTRL(DEBUGLEVEL_VERBOSE, "artnet->Init()");
+	artnet->Init();
+	
+
 	//############################################################################
 	//#                                                                          #
 	//#     Default Config                                                       #
@@ -108,10 +113,10 @@ void X32Ctrl::Init(){
 			DYNAMICEQ = 6
 			*/
 
-			mixer->dsp->DSP2_SetFx(0, FX_TYPE::REVERB, 2);
+			mixer->dsp->DSP2_SetFx(0, FX_TYPE::REVERB, 2); // this effect takes lot of DSP-ressources
             mixer->dsp->DSP2_SetFx(1, FX_TYPE::CHORUS, 2);
             mixer->dsp->DSP2_SetFx(2, FX_TYPE::DELAY, 2);
-            mixer->dsp->DSP2_SetFx(3, FX_TYPE::DYNAMICEQ, 2);
+            mixer->dsp->DSP2_SetFx(3, FX_TYPE::NONE, 2);
             mixer->dsp->DSP2_SetFx(4, FX_TYPE::NONE, 2);
             mixer->dsp->DSP2_SetFx(5, FX_TYPE::NONE, 2);
             mixer->dsp->DSP2_SetFx(6, FX_TYPE::NONE, 2);
@@ -293,11 +298,15 @@ void X32Ctrl::Tick10ms(void){
 void X32Ctrl::Tick50ms(void) {
 	helper->DEBUG_TIMER(DEBUGLEVEL_TRACE, "50ms");
 	UpdateMeters();
+
+	// update Dimmerkernel
+	artnet->Tick();
 }
 
 void X32Ctrl::Tick100ms(void) {
 	static float dspLoadHistory[2][20];
 	static uint8_t dspLoadHistoryPointer = 0;
+	static uint8_t startupCounter = 0;
 
 	helper->DEBUG_TIMER(DEBUGLEVEL_TRACE, "100ms");
 
@@ -325,8 +334,8 @@ void X32Ctrl::Tick100ms(void) {
 			dspLoadMean[0] += dspLoadHistory[0][i];
 			dspLoadMean[1] += dspLoadHistory[1][i];
 		}
-		dspLoadMean[0] /= 20.0;
-		dspLoadMean[1] /= 20.0;
+		dspLoadMean[0] /= 20.0f;
+		dspLoadMean[1] /= 20.0f;
 
 		// show the DSP-load
 		lv_label_set_text_fmt(objects.debugtext_dsp1, "DSP1: Load: %.1f %% | Version: v%.2f | Glitches: %.0f", (double)dspLoadMean[0], (double)state->dspVersion[0], (double)state->dspAudioGlitchCounter[0]);
@@ -337,7 +346,74 @@ void X32Ctrl::Tick100ms(void) {
 	}
 
 	// send AES50-data to FPGA
-	mixer->fpga->AES50Tick(config);
+	// DeviceTypeAndProperty every 2 seconds, Headamp-Message every 2 seconds (Names every 10 seconds)
+	mixer->fpga->AES50Tick();
+
+
+	if (startupCounter < 100) {
+		startupCounter++;
+
+		if (startupCounter == 1) {
+			// set IP-Address in GUI
+			lv_label_set_text_fmt(objects.setup_ipaddresstext, "%s", helper->getIpAddress().c_str());
+		}
+
+		if (startupCounter == 10) {
+/*
+			// re-upload DSPs
+			mixer->dsp->spi->CloseConnectionDsps();
+			mixer->dsp->spi->UploadBitstreamDsps(false); // use UI to show progress
+			mixer->dsp->spi->OpenConnectionDsps();
+			usleep(50000); // wait 50ms
+*/
+
+			// the gate, the dynamics and the EQ-settings are not loaded correctly on first load, so load it again after a short time
+			mixer->LoadConfig(0);
+
+			// in the following lines the default configuration is set so that the users of the beta-version
+			// can start with a working system
+
+			// route channel 1-4 to effects using post-fader tapping
+			for (uint8_t i = 0; i < 8; i++)
+			{
+				config->Set(ROUTING_DSP_OUTPUT, DSP_BUF_IDX_DSPCHANNEL + (i / 2), 40 + i);
+				config->Set(ROUTING_DSP_OUTPUT_TAPPOINT, to_underlying(DSP_TAP::POST_FADER), 40 + i);
+			}
+
+			// set volume of FX-return to 0dBfs
+			for (int i = 0; i < 8; i++)
+			{
+				config->Set(CHANNEL_VOLUME, 0, 40 + i);
+			}
+
+			// set default FXes in FX slots
+			mixer->dsp->DSP2_SetFx(0, FX_TYPE::REVERB, 2); // on first load this effect has a bug, so we have to disable it a bit later
+            mixer->dsp->DSP2_SetFx(1, FX_TYPE::CHORUS, 2);
+            mixer->dsp->DSP2_SetFx(2, FX_TYPE::DELAY, 2);
+            mixer->dsp->DSP2_SetFx(3, FX_TYPE::NONE, 2);
+            mixer->dsp->DSP2_SetFx(4, FX_TYPE::NONE, 2);
+            mixer->dsp->DSP2_SetFx(5, FX_TYPE::NONE, 2);
+            mixer->dsp->DSP2_SetFx(6, FX_TYPE::NONE, 2);
+            mixer->dsp->DSP2_SetFx(7, FX_TYPE::NONE, 2);
+
+			// set FX-settings to wet on slot 1-4
+			config->Set(FX_REVERB_DRY, 0, 0); // fx-slot 1
+			config->Set(FX_REVERB_WET, 1, 0); // fx-slot 1
+			config->Set(FX_CHORUS_MIX, 1, 1); // fx-slot 2
+		}
+
+		if (startupCounter == 40) {
+			// disable effect as on first start of the effect some parts in
+			// the external memory gets corrupted. This needs more debugging
+			// for now stop-restart is fine
+			mixer->dsp->DSP2_SetFx(0, FX_TYPE::NONE, 2);
+		}
+
+		if (startupCounter == 50) {
+			// renable effect
+			mixer->dsp->DSP2_SetFx(0, FX_TYPE::REVERB, 2);
+		}
+	}
 }
 
 void X32Ctrl::ProcessUartDataAdda() {
@@ -1575,7 +1651,7 @@ void X32Ctrl::syncXRemote(bool syncAll) {
 	xremote->SetCard(10); // X-LIVE
 
 	for(uint8_t i=0; i<(uint)X32_VCHANNELTYPE::NORMAL; i++) {
-		uint8_t chanindex = i;
+		//uint8_t chanindex = i;
 		//VChannel* chan = mixer->GetVChannel(i);
 		// if (fullSync || chan->HasChanged(X32_VCHANNEL_CHANGED_VOLUME)){
 		// 	xremote->SetFader(String("ch"), chanindex, mixer->GetVolumeOscvalue(chanindex));
@@ -1598,7 +1674,7 @@ void X32Ctrl::syncXRemote(bool syncAll) {
 	}
 
 	for(uint8_t i=(uint)X32_VCHANNEL_BLOCK::AUX; i<(uint)X32_VCHANNELTYPE::AUX; i++) {
-		uint8_t chanindex = i;
+		//uint8_t chanindex = i;
 		//VChannel* chan = mixer->GetVChannel(i);
 		// if (fullSync || chan->HasChanged(X32_VCHANNEL_CHANGED_VOLUME)){
 		// 	xremote->SetFader(String("auxin"), chanindex, mixer->GetVolumeOscvalue(chanindex));

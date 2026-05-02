@@ -28,7 +28,7 @@ Mixer::Mixer(X32BaseParameter* basepar): X32Base(basepar) {
     fpga = new Fpga(basepar);
     dsp = new DSP1(basepar);
     adda = new Adda(basepar);
-    card = new Card(basepar, adda);   
+    card = new Card(basepar, adda);
 }
 
 void Mixer::Init() {
@@ -239,6 +239,12 @@ void Mixer::LoadRoutingDefault()
         // connect MainLeft on even and MainRight on odd channels as PostFader
         config->Set(ROUTING_DSP_OUTPUT, DSP_BUF_IDX_MAINLEFT + (i % 2), i);
         config->Set(ROUTING_DSP_OUTPUT_TAPPOINT, to_underlying(DSP_TAP::POST_FADER), i);
+    }
+	// connect mixbus-channels 1-8 to DSP2-FX-Channels 1-8 as PostFader
+    for (uint8_t i = 0; i < 8; i++)
+    {
+        config->Set(ROUTING_DSP_OUTPUT, DSP_BUF_IDX_MIXBUS + i, 40 + i);
+        config->Set(ROUTING_DSP_OUTPUT_TAPPOINT, to_underlying(DSP_TAP::POST_FADER), 40 + i);
     }
 
     // connect MainLeft to RTA
@@ -466,9 +472,11 @@ void Mixer::halSendGain(uint8_t dspChannel) {
                 adda->SetGain(boardId, addaChannel, config->GetFloat(CHANNEL_GAIN,  dspChannel), config->GetFloat(CHANNEL_PHANTOM,  dspChannel));
             }
         }else if ((externalDspSourceIndex >= FPGA_OUTPUT_IDX_AES50A) && (externalDspSourceIndex < (FPGA_OUTPUT_IDX_AES50A + 48))) {
-            // AES50A input
+            // AES50A input (never thought that we get this far in the reverse-engineering process, but here we are... :) )
+            fpga->AES50SetHeadampGain(0, externalDspSourceIndex - FPGA_OUTPUT_IDX_AES50A + 1, config->GetFloat(CHANNEL_GAIN,  dspChannel));
+
         }else if ((externalDspSourceIndex >= FPGA_OUTPUT_IDX_AES50B) && (externalDspSourceIndex < (FPGA_OUTPUT_IDX_AES50B + 48))) {
-            // AES50B input
+            // AES50B input (we need more optimizations in the FPGA to get the second AES50-port working, so this is not implemented yet)
         }
     }
 }
@@ -501,8 +509,10 @@ void Mixer::halSendPhantomPower(uint8_t dspChannel) {
             }
         }else if ((externalDspSourceIndex >= FPGA_OUTPUT_IDX_AES50A) && (externalDspSourceIndex < (FPGA_OUTPUT_IDX_AES50A + 48))) {
             // AES50A input
+            fpga->AES50SetPhantomPowerState(0, externalDspSourceIndex - FPGA_OUTPUT_IDX_AES50A + 1, config->GetFloat(CHANNEL_PHANTOM,  dspChannel));
+
         }else if ((externalDspSourceIndex >= FPGA_OUTPUT_IDX_AES50B) && (externalDspSourceIndex < (FPGA_OUTPUT_IDX_AES50B + 48))) {
-            // AES50B input
+            // AES50B input (we need more optimizations in the FPGA to get the second AES50-port working, so this is not implemented yet)
         }
     }
 }
@@ -521,7 +531,7 @@ void Mixer::halSendPhantomPower(uint8_t dspChannel) {
 
 bool Mixer::LoadConfig(uint scene)
 {
-    String loadFile = String(scene) + String(X32_MIXER_CONFIGFILE);
+    String loadFile = "scn" + String(scene) + "_" + String(X32_MIXER_CONFIGFILE);
 
     // no file found
 	if (helper->GetFileSize(loadFile.c_str()) == -1)
@@ -668,7 +678,7 @@ void Mixer::SaveConfig(uint scene)
 		}
 	}
 
-    String saveFile = String(scene) + String(X32_MIXER_CONFIGFILE);
+    String saveFile = "scn" + String(scene) + "_" + String(X32_MIXER_CONFIGFILE);
 	helper->DEBUG_INI(DEBUGLEVEL_NORMAL, "Save config to %s", saveFile.c_str());
 	mixer_ini.save(saveFile.c_str());
 }

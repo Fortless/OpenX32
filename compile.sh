@@ -107,6 +107,18 @@ while [[ $# -gt 0 ]]; do
       CREATE_SSHKEY=true
       shift
       ;;
+    --just-x32ctrl)
+      export COPTS="-mcpu=arm926ej-s -Os -fno-caller-saves -pipe -funit-at-a-time -msoft-float -fno-plt -fno-unwind-tables -fno-asynchronous-unwind-tables"
+      if [ "$COMPILE_MUSL" = true ]; then
+          export PATH=/opt/cross/bin:$PATH
+      else
+          export PATH=/usr/bin:$PATH
+      fi
+      cd software/x32ctrl
+      make -j$(nproc)
+      cd ../..
+      exit 1;
+      ;;
     *)
       echo "Unknown Parameter: $1"
       exit 1
@@ -115,18 +127,45 @@ while [[ $# -gt 0 ]]; do
 done
 
 update_progress 0 "Prepare compilation..."
+# we are patching some files in the submodules to mitigate a full fork
 # configuration-files
-cp files/config_uboot u-boot/.config
-cp files/config_linux linux/.config
-cp files/config_busybox busybox/.config
-cp files/meminit.txt pyatk/bin/
+# u-boot-configuration
+if ! diff -q files/config_uboot u-boot/.config >/dev/null 2>&1; then
+	cp files/config_uboot u-boot/.config
+	echo "Update u-boot/.config (changed content)"
+else
+	echo "u-boot-config is up to date."
+fi
+
+# linux-configuration
+if ! diff -q files/config_linux linux/.config >/dev/null 2>&1; then
+	cp files/config_linux linux/.config
+	echo "Update linux/.config (changed content)"
+else
+	echo "linux-config is up to date."
+fi
+
+# busybox-configuration
+if ! diff -q files/config_busybox software/busybox/.config >/dev/null 2>&1; then
+	cp files/config_busybox software/busybox/.config
+	echo "Update software/busybox/.config (changed content)"
+else
+	echo "busybox-config is up to date."
+fi
+
+cp files/meminit.txt software/pyatk/bin/
+
 # patched source-files
 cp files/imximage.cfg u-boot/board/freescale/mx25pdk/imximage.cfg
 cp files/mx25pdk.c u-boot/board/freescale/mx25pdk/mx25pdk.c
 cp files/mx25pdk.h u-boot/include/configs/mx25pdk.h
 cp files/imx25-pdk.dts linux/arch/arm/boot/dts/nxp/imx/imx25-pdk.dts
+cp files/libartnet_network.c software/libartnet/artnet/network.c
 # custom boot logo - fullscreen -> console has only 1 line!
 # cp files/linux-boot-logo_final.ppm linux/drivers/video/logo/logo_linux_clut224.ppm
+
+
+
 
 export COPTS="-mcpu=arm926ej-s -Os -fno-caller-saves -pipe -funit-at-a-time -msoft-float -fno-plt -fno-unwind-tables -fno-asynchronous-unwind-tables"
 if [ "$COMPILE_MUSL" = true ]; then
@@ -150,19 +189,19 @@ fi
 # =================== Linux =======================
 
 if [ "$COMPILE_LINUX" = true ]; then
-	update_progress 25 "Compile Linux..."
+	update_progress 20 "Compile Linux..."
 	cd ../linux
 	ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- make -j$(nproc) zImage
 	ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- make -j$(nproc) dtbs
-	update_progress 50 "Create U-Boot-image..."
 	mkimage -A ARM -O linux -T kernel -C none -a 0x80060000 -e 0x80060000 -n "Linux kernel (OpenX32)" -d arch/arm/boot/zImage /tmp/uImage
+	cd ..
 fi
 
 # =================== Busybox =======================
 
 if [ "$COMPILE_BUSYBOX" = true ]; then
-	update_progress 55 "Compile busybox..."
-	cd ../busybox
+	update_progress 40 "Compile busybox..."
+	cd software/busybox
 	ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- make -j$(nproc) \
 		CFLAGS="-flto -fwhole-program -flto-partition=none $COPTS" \
 		AR=arm-linux-gnueabi-gcc-ar \
@@ -173,7 +212,7 @@ if [ "$COMPILE_BUSYBOX" = true ]; then
 		AR=arm-linux-gnueabi-gcc-ar \
 		RANLIB=arm-linux-gnueabi-gcc-ranlib
 
-	cd ..
+	cd ../..
 	cp -rP /tmp/busybox_install/bin initramfs_root/
 	cp -rP /tmp/busybox_install/sbin initramfs_root/
 	cp -rP /tmp/busybox_install/linuxrc initramfs_root/
@@ -184,17 +223,39 @@ fi
 if [ "$COMPILE_SOFTWARE" = true ]; then
 	cd software
 
-	update_progress 60 "Compile x32sdconfig..."
+	if [ ! -f /opt/cross/lib/libartnet.so ]; then
+		update_progress 45 "Compile libartnet..."
+		cd libartnet
+		autoreconf -fi
+
+                ./configure \
+                        --host=arm-linux-gnueabi \
+                        --prefix=/opt/cross \
+			ac_cv_func_malloc_0_nonnull=yes \
+			ac_cv_func_realloc_0_nonnull=yes \
+                        CC=arm-linux-gnueabi-gcc \
+                        CXX=arm-linux-gnueabi-g++ \
+                        AR=arm-linux-gnueabi-ar \
+                        RANLIB=arm-linux-gnueabi-ranlib \
+                        LDFLAGS="-L/opt/cross/lib" \
+                        CFLAGS="-U_TIME_BITS -Wno-error"
+
+                sudo env "PATH=$PATH" make install
+
+		cd ..
+	fi
+
+	update_progress 45 "Compile x32sdconfig..."
 	cd x32sdconfig
 	./compile.sh
 	cd ..
 
-	update_progress 65 "Compile x32ctrl..."
+	update_progress 50 "Compile x32ctrl..."
 	cd x32ctrl
 	make -j$(nproc)
 	cd ..
 
-	update_progress 70 "Compile dropbear..."
+	update_progress 55 "Compile dropbear..."
 	cd dropbear
 	./configure	\
 		--disable-pam \
@@ -216,11 +277,11 @@ if [ "$COMPILE_SOFTWARE" = true ]; then
 		AR=arm-linux-gnueabi-gcc-ar \
 		RANLIB=arm-linux-gnueabi-gcc-ranlib
 
-	make PROGRAMS="dropbear dropbearkey" MULTI=1
+	make PROGRAMS="dropbear dbclient dropbearkey dropbearconvert scp" MULTI=1 SCPPROGRESS=1
 	cp dropbearmulti ../bin/
 	cd ..
 
-	update_progress 75 "Compile fb-vnc-server..."
+	update_progress 60 "Compile fb-vnc-server..."
         cd libvncserver
         rm -r build
         mkdir build && cd build
@@ -268,14 +329,20 @@ if [ "$COMPILE_SOFTWARE" = true ]; then
 	cd ..
 fi
 
-# copy tools to initramFS
+
+update_progress 75 "Copy and optimize binaries..."
+
+# copy binaries and default-configuration to initramFS
 mkdir -p initramfs_root/openx32
 mkdir -p initramfs_root/lib
 cp software/bin/x32sdconfig initramfs_root/openx32/
 cp software/bin/x32ctrl initramfs_root/openx32/
 cp software/dropbear/dropbearmulti initramfs_root/openx32/
 cd initramfs_root/openx32/ && ln -sf dropbearmulti dropbear && cd ../../
+cd initramfs_root/openx32/ && ln -sf dropbearmulti dbclient && cd ../../
+cd initramfs_root/openx32/ && ln -sf dropbearmulti dropbearconvert && cd ../../
 cd initramfs_root/openx32/ && ln -sf dropbearmulti dropbearkey && cd ../../
+cd initramfs_root/openx32/ && ln -sf dropbearmulti scp && cd ../../
 cp software/framebuffer-vncserver/build/framebuffer-vncserver initramfs_root/openx32/
 
 # copy general libraries
@@ -286,6 +353,7 @@ if [ "$COMPILE_MUSL" = true ]; then
 	cp $(arm-linux-gnueabi-gcc -print-file-name=libc.so) initramfs_root/lib/libc.so
 	cp $(arm-linux-gnueabi-gcc -print-file-name=libstdc++.so.6) initramfs_root/lib/libstdc++.so.6
 	cp $(arm-linux-gnueabi-gcc -print-file-name=libgcc_s.so.1) initramfs_root/lib/libgcc_s.so.1
+	cp $(arm-linux-gnueabi-gcc -print-file-name=libartnet.so.1) initramfs_root/lib/libartnet.so.1
 	cd initramfs_root/lib/ && ln -sf libc.so ld-musl-arm.so.1 && cd ../../
 else
 	# copy specific libraries for glibc
@@ -296,17 +364,19 @@ else
 	cp $(arm-linux-gnueabi-gcc -print-file-name=libm.so.6) initramfs_root/lib/libm.so.6
 	cp $(arm-linux-gnueabi-gcc -print-file-name=libresolv.so.2) initramfs_root/lib/libresolv.so.2
 	cp $(arm-linux-gnueabi-gcc -print-file-name=libcrypt.so.1) initramfs_root/lib/libcrypt.so.1
+	cp $(arm-linux-gnueabi-gcc -print-file-name=libartnet.so.1) initramfs_root/lib/libartnet.so.1
 fi
 
+
+# =================== Optimize binaries =======================
 arm-linux-gnueabi-strip initramfs_root/lib/*
 arm-linux-gnueabi-strip initramfs_root/openx32/*
 arm-linux-gnueabi-strip initramfs_root/bin/*
 arm-linux-gnueabi-strip initramfs_root/sbin/*
 
 
-
 # =================== Create MOTD =======================
-GITREV=$(git describe --tags --always --dirty)
+GITREV=$(git describe --tags --always --dirty --long)
 DATE=$(date +%d.%m.%Y)
 
 echo "  ____                  __   ______ ____" > initramfs_root/etc/motd
@@ -325,7 +395,7 @@ echo "---------------------------------------------------"  >> initramfs_root/et
 # =================== Create SSH-KEY =======================
 if [ "$CREATE_SSHKEY" = true ]; then
 	cd initramfs_root/etc/dropbear
-	dropbearkey -t rsa -f openx32_key
+	dropbearkey -t ed25519 -f openx32_key
 	cd ../../../
 fi
 

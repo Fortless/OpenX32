@@ -35,8 +35,9 @@ sudo make install
 sudo dpkg --add-architecture armel
 sudo apt update
 
-# libz required for openssh-portable
-sudo apt install zlib1g-dev:armel libz-dev:armel
+# libz required for vnc-server
+# libudev required for automount and usb-DMX512-interfaces
+sudo apt install zlib1g-dev:armel libz-dev:armel libudev-dev:armel
 
 # libasound2 required for audio-output
 #sudo apt install libasound2:armel
@@ -50,7 +51,7 @@ sudo apt install zlib1g-dev:armel libz-dev:armel
 #echo "Configuring pyATK..."
 #cp files/usbdev.py pyatk/pyatk/channel/
 #cp files/boot.py pyatk/pyatk/
-#cd pyatk
+#cd software/pyatk
 #python3 -m venv pyatk_venv
 #source pyatk_venv/bin/activate
 #pip install pyserial pyusb==1.0.0
